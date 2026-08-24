@@ -3,12 +3,26 @@ name = "slidejunction"
 version = "0.1.0"
 description = "A Python-powered presentation framework bridging Markdown, AI, code, and visual editing."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-slidejunction = "slidejunction:main"
+slidejunction = "slidejunction.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.4",
+]
