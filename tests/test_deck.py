@@ -18,7 +18,10 @@ _PROJECT_ENTRY_NAMES = {
 def test_direct_construction_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(
         TypeError,
-        match=r"^Deck cannot be constructed directly; use Deck\.init\(\)\.$",
+        match=(
+            r"^Deck cannot be constructed directly; "
+            r"use Deck\.init\(\) or Deck\.open\(\)\.$"
+        ),
     ):
         Deck(tmp_path)
 
