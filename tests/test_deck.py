@@ -1,3 +1,6 @@
+import runpy
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -72,6 +75,10 @@ def test_init_creates_minimal_project_in_nested_path(tmp_path: Path) -> None:
     expected_contents = {
         "deck.py": (
             '"""Python control entry point for this SlideJunction presentation."""\n'
+            "\n"
+            "from slidejunction import Deck\n"
+            "\n"
+            "deck = Deck.open(__file__)\n"
         ),
         "slides.md": "# Untitled Presentation\n",
         "theme.css": "/* SlideJunction presentation theme */\n",
@@ -82,6 +89,32 @@ def test_init_creates_minimal_project_in_nested_path(tmp_path: Path) -> None:
 
     for name in ("deck.toml", *expected_contents):
         assert (project_path / name).read_bytes().endswith(b"\n")
+
+
+def test_generated_deck_exposes_opened_deck_object(tmp_path: Path) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+
+    namespace = runpy.run_path(str(project / "deck.py"))
+
+    deck = namespace["deck"]
+    assert isinstance(deck, Deck)
+    assert deck.root == project
+
+
+def test_generated_deck_executes_outside_project_directory(tmp_path: Path) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+    working_directory = tmp_path / "outside-project"
+    working_directory.mkdir()
+
+    completed = subprocess.run(
+        [sys.executable, str(project / "deck.py")],
+        cwd=working_directory,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0
 
 
 def test_init_accepts_existing_empty_directory(tmp_path: Path) -> None:

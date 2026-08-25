@@ -17,6 +17,10 @@ _PROJECT_FILES = {
     ),
     "deck.py": (
         '"""Python control entry point for this SlideJunction presentation."""\n'
+        "\n"
+        "from slidejunction import Deck\n"
+        "\n"
+        "deck = Deck.open(__file__)\n"
     ),
     "slides.md": "# Untitled Presentation\n",
     "theme.css": "/* SlideJunction presentation theme */\n",
