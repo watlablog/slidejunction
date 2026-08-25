@@ -2,11 +2,13 @@ import subprocess
 import sys
 
 import slidejunction
+from slidejunction import Deck
 from slidejunction.cli import main
 
 
 def test_package_can_be_imported() -> None:
     assert slidejunction.__name__ == "slidejunction"
+    assert slidejunction.Deck is Deck
 
 
 def test_cli_main(capsys) -> None:
