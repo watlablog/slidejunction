@@ -6,7 +6,9 @@ readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "markdown-it-py>=4.2,<4.3",
+]
 
 [project.scripts]
 slidejunction = "slidejunction.cli:main"
