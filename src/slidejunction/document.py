@@ -37,6 +37,27 @@ class SourceSpan:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ConfigPointer:
+    """An RFC 6901 JSON Pointer with optional source provenance."""
+
+    pointer: str
+    path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pointer, str):
+            raise TypeError("JSON Pointer must be a string")
+        if self.pointer and not self.pointer.startswith("/"):
+            raise ValueError("A non-root JSON Pointer must start with '/'")
+        if "~" in self.pointer.replace("~0", "").replace("~1", ""):
+            raise ValueError("JSON Pointer contains an invalid escape sequence")
+        if self.path is not None and not isinstance(self.path, Path):
+            raise TypeError("Configuration provenance path must be a Path or None")
+
+
+DiagnosticLocation: TypeAlias = SourceSpan | ConfigPointer
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class SourceBinding:
     """Source ranges for a node's Markdown syntax and optional config marker."""
 
@@ -54,12 +75,44 @@ class DiagnosticSeverity(StrEnum):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Diagnostic:
-    """A source-bound issue reported while constructing a document."""
+    """A source- or configuration-bound issue."""
 
     severity: DiagnosticSeverity
     code: str
     message: str
-    source_span: SourceSpan
+    source_span: SourceSpan | None = None
+    config_pointer: ConfigPointer | None = None
+    ref_id: int | None = None
+    related_locations: tuple[DiagnosticLocation, ...] = ()
+    hint: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_span is not None and not isinstance(
+            self.source_span, SourceSpan
+        ):
+            raise TypeError("Diagnostic source_span must be a SourceSpan or None")
+        if self.config_pointer is not None and not isinstance(
+            self.config_pointer, ConfigPointer
+        ):
+            raise TypeError("Diagnostic config_pointer must be a ConfigPointer or None")
+        if (self.source_span is None) == (self.config_pointer is None):
+            raise ValueError(
+                "A diagnostic must have exactly one source span or config pointer"
+            )
+        _validate_config_ref(self.ref_id)
+        locations = tuple(self.related_locations)
+        if not all(isinstance(item, SourceSpan | ConfigPointer) for item in locations):
+            raise TypeError("Related diagnostic locations are invalid")
+        object.__setattr__(self, "related_locations", locations)
+
+    @property
+    def location(self) -> DiagnosticLocation:
+        """Return the diagnostic's derived location."""
+        if self.source_span is not None:
+            return self.source_span
+        if self.config_pointer is None:  # pragma: no cover - protected by validation
+            raise ValueError("Diagnostic location is missing")
+        return self.config_pointer
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -340,7 +393,9 @@ __all__ = [
     "Block",
     "BlockQuote",
     "CodeBlock",
+    "ConfigPointer",
     "Diagnostic",
+    "DiagnosticLocation",
     "DiagnosticSeverity",
     "Emphasis",
     "HardBreak",

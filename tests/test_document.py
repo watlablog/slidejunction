@@ -8,6 +8,7 @@ from slidejunction import document
 from slidejunction.document import (
     BlockQuote,
     CodeBlock,
+    ConfigPointer,
     Diagnostic,
     DiagnosticSeverity,
     Emphasis,
@@ -325,6 +326,68 @@ def test_source_document_retains_original_text_path_and_diagnostics() -> None:
     assert source_document.path == Path("slides.md")
     assert source_document.presentation.diagnostics == (diagnostic,)
     assert diagnostic.severity == "warning"
+    assert diagnostic.location is span
+
+
+def test_configuration_diagnostic_uses_derived_json_pointer_location() -> None:
+    pointer = ConfigPointer(path=Path("layout.json"), pointer="/theme/colors/accent-1")
+    related = ConfigPointer(path=Path("layout.json"), pointer="/theme/preset")
+    diagnostic = Diagnostic(
+        severity=DiagnosticSeverity.ERROR,
+        code="missing-theme-color-token",
+        message="The referenced theme color token is unavailable.",
+        config_pointer=pointer,
+        ref_id=3,
+        related_locations=(related,),
+        hint="Define the token or remove the override.",
+    )
+
+    assert diagnostic.source_span is None
+    assert diagnostic.config_pointer is pointer
+    assert diagnostic.location is pointer
+    assert diagnostic.ref_id == 3
+    assert diagnostic.related_locations == (related,)
+
+
+@pytest.mark.parametrize(
+    "both_locations",
+    [False, True],
+)
+def test_diagnostic_requires_exactly_one_stored_location(
+    both_locations: bool,
+) -> None:
+    locations = (
+        {
+            "source_span": _span(0, 1),
+            "config_pointer": ConfigPointer(pointer="/theme"),
+        }
+        if both_locations
+        else {}
+    )
+    with pytest.raises(ValueError, match="exactly one"):
+        Diagnostic(
+            severity=DiagnosticSeverity.ERROR,
+            code="example",
+            message="Example diagnostic.",
+            **locations,
+        )
+
+
+@pytest.mark.parametrize(
+    "pointer, message",
+    [
+        ("theme", "must start with"),
+        ("configurations/3", "must start with"),
+        ("/theme/~2", "invalid escape"),
+    ],
+)
+def test_config_pointer_requires_rfc_6901_syntax(pointer: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        ConfigPointer(pointer=pointer)
+
+
+def test_diagnostic_location_is_derived_not_stored() -> None:
+    assert "location" not in Diagnostic.__dataclass_fields__
 
 
 def test_document_module_is_public_without_expanding_top_level_api() -> None:
