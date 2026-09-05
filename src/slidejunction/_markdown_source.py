@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,6 +17,7 @@ from .document import SourceSpan
 
 _SPAN_META_KEY = "slidejunction_source_span"
 _BLOCK_SPAN_META_KEY = "slidejunction_block_source_span"
+_IMAGE_CHILDREN_REBASED_META_KEY = "slidejunction_image_children_rebased"
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,11 +251,28 @@ class TrackingStateInline(StateInline):
 
     pending_start: int | None
     rule_start: int
+    _link_label_scan_depth: int
+    _link_label_suppressed_cache: dict[int, int]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.pending_start = None
         self.rule_start = 0
+        self._link_label_scan_depth = 0
+        self._link_label_suppressed_cache = {}
+
+    @property
+    def scanning_link_label_boundary(self) -> bool:
+        """Whether CommonMark is discovering a Link or Image label boundary."""
+        return self._link_label_scan_depth > 0
+
+    @contextmanager
+    def _link_label_boundary_scan(self) -> Iterator[None]:
+        self._link_label_scan_depth += 1
+        try:
+            yield
+        finally:
+            self._link_label_scan_depth -= 1
 
     def pushPending(self) -> Token:
         if self.pending_start is None:
@@ -268,6 +288,22 @@ class TrackingStateInline(StateInline):
 
 class TrackingParserInline(ParserInline):
     """ParserInline adapter proven to retain exact rule-consumption ranges."""
+
+    def skipToken(self, state: StateInline) -> None:
+        """Keep normal and Link-label-suppressed lookahead caches separate."""
+        if not isinstance(state, TrackingStateInline):
+            super().skipToken(state)
+            return
+        if not state.scanning_link_label_boundary:
+            super().skipToken(state)
+            return
+
+        normal_cache = state.cache
+        state.cache = state._link_label_suppressed_cache
+        try:
+            super().skipToken(state)
+        finally:
+            state.cache = normal_cache
 
     def tokenize(self, state: TrackingStateInline) -> None:
         rules = self.ruler.getRules("")
@@ -302,6 +338,8 @@ class TrackingParserInline(ParserInline):
                                 pending_before,
                             )
                         token.meta.setdefault(_SPAN_META_KEY, token_span)
+                        if token.type == "image" and token.children:
+                            _rebase_image_children_once(token, start)
                     break
 
             if matched:
@@ -330,6 +368,27 @@ class TrackingParserInline(ParserInline):
         for rule in self.ruler2.getRules(""):
             rule(state)
         return state.tokens
+
+
+class TrackingHelpers:
+    """Per-parser helper proxy that marks CommonMark label discovery only."""
+
+    def __init__(self, upstream: Any) -> None:
+        self._upstream = upstream
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._upstream, name)
+
+    def parseLinkLabel(
+        self,
+        state: StateInline,
+        start: int,
+        disableNested: bool = False,
+    ) -> int:
+        if not isinstance(state, TrackingStateInline):
+            return self._upstream.parseLinkLabel(state, start, disableNested)
+        with state._link_label_boundary_scan():
+            return self._upstream.parseLinkLabel(state, start, disableNested)
 
 
 class TrackingParserBlock(ParserBlock):
@@ -413,6 +472,28 @@ def token_relative_span(token: Token) -> tuple[int, int]:
     return value
 
 
+def rebase_token_spans(tokens: list[Token], offset: int) -> None:
+    """Move a recursively parsed token tree into its parent inline coordinates."""
+    if offset < 0:
+        raise ValueError("Inline token span offset must be non-negative")
+    for token in tokens:
+        start, end = token_relative_span(token)
+        token.meta[_SPAN_META_KEY] = (start + offset, end + offset)
+        if token.children:
+            rebase_token_spans(token.children, offset)
+
+
+def _rebase_image_children_once(token: Token, image_start: int) -> None:
+    """Move Image label children into that Image token's coordinate system once."""
+
+    if token.meta.get(_IMAGE_CHILDREN_REBASED_META_KEY) is True:
+        return
+    if not token.children:
+        return
+    rebase_token_spans(token.children, image_start + 2)
+    token.meta[_IMAGE_CHILDREN_REBASED_META_KEY] = True
+
+
 def token_block_span(token: Token) -> tuple[int, int]:
     value = token.meta.get(_BLOCK_SPAN_META_KEY)
     if (
@@ -428,9 +509,11 @@ __all__ = [
     "MappedText",
     "NormalizedSource",
     "SourceIndex",
+    "TrackingHelpers",
     "TrackingParserBlock",
     "TrackingParserInline",
     "block_node_start",
+    "rebase_token_spans",
     "token_block_span",
     "token_relative_span",
 ]

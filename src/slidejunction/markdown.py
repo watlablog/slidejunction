@@ -16,9 +16,12 @@ from markdown_it.token import Token
 from ._markdown_source import (
     MappedText,
     SourceIndex,
+    TrackingHelpers,
     TrackingParserBlock,
     TrackingParserInline,
+    TrackingStateInline,
     block_node_start,
+    rebase_token_spans,
     token_block_span,
     token_relative_span,
 )
@@ -34,6 +37,7 @@ from .document import (
     ImageBlock,
     Inline,
     InlineCode,
+    InlineFormat,
     InlineImage,
     InlineMath,
     Link,
@@ -49,6 +53,8 @@ from .document import (
     SourceDocument,
     SourceSpan,
     Strong,
+    Subscript,
+    Superscript,
     Text,
     ThematicBreak,
 )
@@ -56,6 +62,10 @@ from .document import (
 _VALID_CONFIG_REF = re.compile(r"^<!-- sj:ref=([1-9][0-9]*) -->$")
 _MARKER_INTENT = re.compile(r"^\s*<!--\s*sj:ref\b")
 _COMMENT = re.compile(r"^\s*<!--[\s\S]*-->\s*$")
+_INLINE_FORMAT_OPEN = re.compile(r"<sj-format ref[ \t]*=[ \t]*([1-9][0-9]*)>")
+_INLINE_FORMAT_CLOSE = "</sj-format>"
+_INLINE_FORMAT_INTENT = re.compile(r"</?sj-format(?=[ \t/>]|\n|$)")
+_SCRIPT_OPAQUE_STARTS = frozenset("\\`<[!")
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +128,7 @@ def _create_parser() -> MarkdownIt:
     )
     parser.block = TrackingParserBlock()
     parser.inline = TrackingParserInline()
+    parser.helpers = TrackingHelpers(parser.helpers)
     parser.block.ruler.at(
         "html_block",
         _recovering_html_block_rule,
@@ -126,6 +137,16 @@ def _create_parser() -> MarkdownIt:
     parser.inline.ruler2.disable(["fragments_join"])
     parser.core.ruler.disable(["text_join"])
     parser.inline.ruler.before("escape", "slidejunction_math", _inline_math_rule)
+    parser.inline.ruler.before(
+        "html_inline",
+        "slidejunction_inline_format",
+        _inline_format_rule,
+    )
+    parser.inline.ruler.before(
+        "emphasis",
+        "slidejunction_script",
+        _script_rule,
+    )
     parser.block.ruler.before(
         "fence",
         "slidejunction_math",
@@ -204,6 +225,202 @@ def _inline_math_rule(state: StateInline, silent: bool) -> bool:
     token.markup = r"\("
     state.pos = close + 2
     return True
+
+
+def _inline_format_rule(state: StateInline, silent: bool) -> bool:
+    if _defer_native_syntax_to_link_label_boundary(state, silent):
+        return False
+    start = state.pos
+    source = state.src
+
+    if source.startswith(_INLINE_FORMAT_CLOSE, start):
+        end = start + len(_INLINE_FORMAT_CLOSE)
+        if not silent:
+            token = state.push("sj_inline_format_unexpected_close", "", 0)
+            token.content = source[start:end]
+        state.pos = end
+        return True
+
+    opening = _INLINE_FORMAT_OPEN.match(source, start, state.posMax)
+    if opening is not None:
+        content_start = opening.end()
+        close_start = _find_inline_format_close(
+            state,
+            content_start,
+            state.posMax,
+        )
+        if close_start is None:
+            if not silent:
+                token = state.push("sj_inline_format_unterminated", "", 0)
+                token.content = source[start:content_start]
+            state.pos = content_start
+            return True
+
+        end = close_start + len(_INLINE_FORMAT_CLOSE)
+        if silent:
+            state.pos = end
+            return True
+        children = _parse_recursive_inlines(state, content_start, close_start)
+        token = state.push("sj_inline_format", "", 0)
+        token.content = source[content_start:close_start]
+        token.children = children or None
+        token.meta["config_ref"] = int(opening.group(1))
+        state.pos = end
+        return True
+
+    invalid_end = _inline_format_intent_end(source, start, state.posMax)
+    if invalid_end is None:
+        return False
+    if not silent:
+        token = state.push("sj_inline_format_invalid", "", 0)
+        token.content = source[start:invalid_end]
+    state.pos = invalid_end
+    return True
+
+
+def _script_rule(state: StateInline, silent: bool) -> bool:
+    if _defer_native_syntax_to_link_label_boundary(state, silent):
+        return False
+    start = state.pos
+    if start + 1 >= state.posMax:
+        return False
+    marker = state.src[start]
+    if marker not in {"^", "_"} or state.src[start + 1] != "{":
+        return False
+
+    close = _find_script_close(state, start + 2, state.posMax)
+    if close is None:
+        return False
+    end = close + 1
+    if silent:
+        state.pos = end
+        return True
+
+    children = _parse_recursive_inlines(state, start + 2, close)
+    token_type = "sj_superscript" if marker == "^" else "sj_subscript"
+    token = state.push(token_type, "", 0)
+    token.content = state.src[start + 2 : close]
+    token.children = children or None
+    state.pos = end
+    return True
+
+
+def _parse_recursive_inlines(
+    state: StateInline,
+    start: int,
+    end: int,
+) -> list[Token]:
+    children: list[Token] = []
+    state.md.inline.parse(state.src[start:end], state.md, state.env, children)
+    rebase_token_spans(children, start)
+    return children
+
+
+def _defer_native_syntax_to_link_label_boundary(
+    state: StateInline,
+    silent: bool,
+) -> bool:
+    return (
+        silent
+        and isinstance(state, TrackingStateInline)
+        and state.scanning_link_label_boundary
+    )
+
+
+def _find_inline_format_close(
+    state: StateInline,
+    start: int,
+    allowed_end: int,
+) -> int | None:
+    if not 0 <= start <= allowed_end <= state.posMax:
+        raise ValueError("InlineFormat delimiter scan boundary is invalid")
+    scanner = TrackingStateInline(state.src, state.md, state.env, [])
+    scanner.pos = start
+    scanner.posMax = allowed_end
+    nested_depth = 0
+    while scanner.pos < scanner.posMax:
+        if scanner.src.startswith(
+            _INLINE_FORMAT_CLOSE,
+            scanner.pos,
+            scanner.posMax,
+        ):
+            if nested_depth == 0:
+                return scanner.pos
+            nested_depth -= 1
+            scanner.pos += len(_INLINE_FORMAT_CLOSE)
+            continue
+        nested_opening = _INLINE_FORMAT_OPEN.match(
+            scanner.src,
+            scanner.pos,
+            scanner.posMax,
+        )
+        if nested_opening is not None:
+            nested_depth += 1
+            scanner.pos = nested_opening.end()
+            continue
+        if scanner.src.startswith(("^{", "_{"), scanner.pos):
+            scanner.pos += 2
+            continue
+        previous = scanner.pos
+        scanner.md.inline.skipToken(scanner)
+        if scanner.pos <= previous:
+            raise ValueError("InlineFormat delimiter scan made no source progress")
+    return None
+
+
+def _find_script_close(
+    state: StateInline,
+    start: int,
+    allowed_end: int,
+) -> int | None:
+    if not 0 <= start <= allowed_end <= state.posMax:
+        raise ValueError("Script delimiter scan boundary is invalid")
+    scanner = TrackingStateInline(state.src, state.md, state.env, [])
+    scanner.pos = start
+    scanner.posMax = allowed_end
+    brace_depth = 0
+    while scanner.pos < scanner.posMax:
+        character = scanner.src[scanner.pos]
+        if character == "}":
+            if brace_depth == 0:
+                return scanner.pos
+            brace_depth -= 1
+            scanner.pos += 1
+            continue
+        if character == "{":
+            brace_depth += 1
+            scanner.pos += 1
+            continue
+        nested_format = _INLINE_FORMAT_OPEN.match(
+            scanner.src,
+            scanner.pos,
+            scanner.posMax,
+        )
+        if nested_format is not None:
+            scanner.pos = nested_format.end()
+            continue
+        if character in _SCRIPT_OPAQUE_STARTS:
+            previous = scanner.pos
+            scanner.md.inline.skipToken(scanner)
+            if scanner.pos <= previous:
+                raise ValueError("Script delimiter scan made no source progress")
+            continue
+        scanner.pos += 1
+    return None
+
+
+def _inline_format_intent_end(
+    source: str,
+    start: int,
+    end: int,
+) -> int | None:
+    if _INLINE_FORMAT_INTENT.match(source, start, end) is None:
+        return None
+    line_end = source.find("\n", start, end)
+    if line_end < 0:
+        line_end = end
+    tag_end = source.find(">", start, line_end)
+    return tag_end + 1 if tag_end >= 0 else line_end
 
 
 def _block_math_rule(
@@ -702,13 +919,49 @@ class _Converter:
                 continue
             if token.type in {"strong_close", "em_close", "link_close"}:
                 raise ValueError(f"Unexpected inline closing token: {token.type}")
-            if token.type == "code_inline":
+            if token.type in {
+                "sj_inline_format",
+                "sj_superscript",
+                "sj_subscript",
+            }:
+                nested = self._convert_inlines(token.children or [], mapped)
+                if token.type == "sj_inline_format":
+                    config_ref = token.meta.get("config_ref")
+                    if (
+                        not isinstance(config_ref, int)
+                        or isinstance(config_ref, bool)
+                        or config_ref < 1
+                    ):
+                        raise ValueError("InlineFormat token has an invalid reference")
+                    children.append(
+                        InlineFormat(
+                            config_ref=config_ref,
+                            children=nested,
+                            source_span=span,
+                        )
+                    )
+                elif token.type == "sj_superscript":
+                    children.append(Superscript(children=nested, source_span=span))
+                else:
+                    children.append(Subscript(children=nested, source_span=span))
+            elif token.type in {
+                "sj_inline_format_unterminated",
+                "sj_inline_format_unexpected_close",
+                "sj_inline_format_invalid",
+            }:
+                children.append(
+                    Text(
+                        value=self._recover_inline_format(token, mapped, span),
+                        source_span=span,
+                    )
+                )
+            elif token.type == "code_inline":
                 children.append(InlineCode(code=token.content, source_span=span))
             elif token.type == "image":
                 children.append(
                     InlineImage(
                         src=token.attrGet("src") or "",
-                        alt=_inline_plain_text(token.children or []),
+                        alt=self._inline_plain_text(token.children or [], mapped),
                         title=token.attrGet("title"),
                         source_span=span,
                     )
@@ -749,6 +1002,65 @@ class _Converter:
         if stop_type is not None:
             raise ValueError(f"Missing inline closing token: {stop_type}")
         return tuple(children)
+
+    def _recover_inline_format(
+        self,
+        token: Token,
+        mapped: MappedText,
+        span: SourceSpan,
+    ) -> str:
+        diagnostics = {
+            "sj_inline_format_unterminated": (
+                "unterminated-inline-format",
+                "Inline formatting opener has no matching closing tag.",
+            ),
+            "sj_inline_format_unexpected_close": (
+                "unexpected-inline-format-close",
+                "Inline formatting closing tag has no matching opener.",
+            ),
+            "sj_inline_format_invalid": (
+                "invalid-inline-format-tag",
+                "Inline formatting tag syntax is invalid.",
+            ),
+        }
+        try:
+            code, message = diagnostics[token.type]
+        except KeyError as error:
+            raise ValueError("Unsupported InlineFormat recovery token") from error
+        self._diagnose(DiagnosticSeverity.ERROR, code, message, span)
+        relative_start, relative_end = token_relative_span(token)
+        return mapped.original_text(relative_start, relative_end)
+
+    def _inline_plain_text(
+        self,
+        tokens: list[Token],
+        mapped: MappedText,
+    ) -> str:
+        parts: list[str] = []
+        for token in tokens:
+            if token.type in {"text", "text_special", "code_inline"}:
+                parts.append(token.content)
+            elif token.type in {"softbreak", "hardbreak"}:
+                parts.append("\n")
+            elif token.type == "image":
+                parts.append(self._inline_plain_text(token.children or [], mapped))
+            elif token.type == "sj_math_inline":
+                parts.append(token.content)
+            elif token.type in {
+                "sj_inline_format",
+                "sj_superscript",
+                "sj_subscript",
+            }:
+                parts.append(self._inline_plain_text(token.children or [], mapped))
+            elif token.type in {
+                "sj_inline_format_unterminated",
+                "sj_inline_format_unexpected_close",
+                "sj_inline_format_invalid",
+            }:
+                relative_start, relative_end = token_relative_span(token)
+                span = mapped.span(relative_start, relative_end)
+                parts.append(self._recover_inline_format(token, mapped, span))
+        return "".join(parts)
 
     def _convert_inline_html(self, token: Token, span: SourceSpan) -> None:
         if _COMMENT.fullmatch(token.content):
@@ -854,20 +1166,6 @@ def _matching_close(tokens: list[Token], start: int, close_type: str) -> int:
                 return position
             depth -= 1
     raise ValueError(f"Missing inline closing token: {close_type}")
-
-
-def _inline_plain_text(tokens: list[Token]) -> str:
-    parts: list[str] = []
-    for token in tokens:
-        if token.type in {"text", "text_special", "code_inline"}:
-            parts.append(token.content)
-        elif token.type in {"softbreak", "hardbreak"}:
-            parts.append("\n")
-        elif token.type == "image":
-            parts.append(_inline_plain_text(token.children or []))
-        elif token.type == "sj_math_inline":
-            parts.append(token.content)
-    return "".join(parts)
 
 
 def _bind_config_refs(

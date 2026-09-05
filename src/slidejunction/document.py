@@ -197,6 +197,34 @@ class InlineMath:
         _validate_config_ref(self.config_ref)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class InlineFormat:
+    """A nested inline range bound to a shared formatting reference."""
+
+    config_ref: int
+    children: tuple[Inline, ...]
+    source_span: SourceSpan
+
+    def __post_init__(self) -> None:
+        _validate_config_ref(self.config_ref)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Superscript:
+    """Semantic superscript inline content."""
+
+    children: tuple[Inline, ...]
+    source_span: SourceSpan
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Subscript:
+    """Semantic subscript inline content."""
+
+    children: tuple[Inline, ...]
+    source_span: SourceSpan
+
+
 Inline: TypeAlias = (
     Text
     | Strong
@@ -207,6 +235,9 @@ Inline: TypeAlias = (
     | SoftBreak
     | HardBreak
     | InlineMath
+    | InlineFormat
+    | Superscript
+    | Subscript
 )
 
 
@@ -403,6 +434,7 @@ __all__ = [
     "ImageBlock",
     "Inline",
     "InlineCode",
+    "InlineFormat",
     "InlineImage",
     "InlineMath",
     "Link",
@@ -419,6 +451,8 @@ __all__ = [
     "SourceDocument",
     "SourceSpan",
     "Strong",
+    "Subscript",
+    "Superscript",
     "Text",
     "ThematicBreak",
 ]

@@ -16,6 +16,7 @@ from slidejunction.document import (
     Heading,
     ImageBlock,
     InlineCode,
+    InlineFormat,
     InlineImage,
     InlineMath,
     Link,
@@ -31,6 +32,8 @@ from slidejunction.document import (
     SourceDocument,
     SourceSpan,
     Strong,
+    Subscript,
+    Superscript,
     Text,
     ThematicBreak,
 )
@@ -178,6 +181,36 @@ def test_inline_model_preserves_nested_semantics() -> None:
     assert paragraph.children[1] is nested
     assert nested.children[0].children[0].value == "nested"
     assert paragraph.children[3] is link
+
+
+def test_native_inline_extension_nodes_preserve_nested_semantics() -> None:
+    span = _span(0, 20)
+    superscript = Superscript(
+        children=(Text(value="2", source_span=span),),
+        source_span=span,
+    )
+    subscript = Subscript(
+        children=(Text(value="i", source_span=span),),
+        source_span=span,
+    )
+    formatted = InlineFormat(
+        config_ref=8,
+        children=(superscript, subscript),
+        source_span=span,
+    )
+
+    assert formatted.children == (superscript, subscript)
+    assert formatted.config_ref == 8
+    with pytest.raises(FrozenInstanceError):
+        formatted.config_ref = 9  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("invalid_ref", [0, -1, True])
+def test_inline_format_reference_must_be_a_positive_integer(
+    invalid_ref: int,
+) -> None:
+    with pytest.raises(ValueError):
+        InlineFormat(config_ref=invalid_ref, children=(), source_span=_span(0, 1))
 
 
 def test_block_model_represents_recursive_structure() -> None:
@@ -395,6 +428,7 @@ def test_document_module_is_public_without_expanding_top_level_api() -> None:
     assert "Presentation" not in slidejunction.__all__
     assert "Presentation" in document.__all__
     assert document.Presentation is Presentation
+    assert {"InlineFormat", "Superscript", "Subscript"} <= set(document.__all__)
 
 
 def _span(
