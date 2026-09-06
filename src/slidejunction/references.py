@@ -229,20 +229,36 @@ def validate_references(
     layout_path: str | Path | None = None,
 ) -> ReferenceValidationResult:
     """Build and validate a derived ref graph without filesystem I/O."""
-    if not isinstance(source_document, SourceDocument):
-        raise TypeError("source_document must be a SourceDocument")
-    if not isinstance(layout_document, LayoutDocument):
-        raise TypeError("layout_document must be a LayoutDocument")
     provenance = None if layout_path is None else Path(layout_path)
-    definitions = _collect_definitions(layout_document, provenance)
-    usages = _collect_usages(source_document)
-    index = ReferenceIndex(
-        definitions=_group_references(definitions),
-        usages=_group_references(usages),
+    index = _build_reference_index(
+        source_document,
+        layout_document,
+        layout_path=provenance,
     )
     return ReferenceValidationResult(
         index=index,
         diagnostics=_validate_index(index),
+    )
+
+
+def _build_reference_index(
+    source_document: SourceDocument,
+    layout_document: LayoutDocument,
+    *,
+    layout_path: Path | None,
+) -> ReferenceIndex:
+    """Build the pure derived index without producing diagnostics."""
+    if not isinstance(source_document, SourceDocument):
+        raise TypeError("source_document must be a SourceDocument")
+    if not isinstance(layout_document, LayoutDocument):
+        raise TypeError("layout_document must be a LayoutDocument")
+    if layout_path is not None and not isinstance(layout_path, Path):
+        raise TypeError("layout_path must be a Path or None")
+    definitions = _collect_definitions(layout_document, layout_path)
+    usages = _collect_usages(source_document)
+    return ReferenceIndex(
+        definitions=_group_references(definitions),
+        usages=_group_references(usages),
     )
 
 

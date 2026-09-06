@@ -799,6 +799,22 @@ def test_validate_references_checks_inputs_without_merging_existing_diagnostics(
         validate_references(source, None)  # type: ignore[arg-type]
 
 
+def test_private_index_builder_only_constructs_the_snapshot_graph() -> None:
+    source = parse_markdown("<!-- sj:ref=3 -->\ntext")
+    layout = _layout(configurations={3: Configuration()})
+
+    index = references._build_reference_index(
+        source,
+        layout,
+        layout_path=Path("layout.json"),
+    )
+
+    assert index.definitions_for(3)[0].value is layout.configurations[3]
+    assert index.definitions_for(3)[0].config_pointer.path == Path("layout.json")
+    assert index.usages_for(3)[0].consumer is source.presentation.items[0].blocks[0]
+    assert "_build_reference_index" not in references.__all__
+
+
 def test_references_module_is_public_without_expanding_package_top_level() -> None:
     assert slidejunction.__all__ == ["Deck"]
     assert not hasattr(slidejunction, "validate_references")
