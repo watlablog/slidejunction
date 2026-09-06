@@ -5,7 +5,17 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .layout import Crop, ElementKind, FocalPoint, MediaFit
+from ._image_common import (
+    _complete_crop_percent_to_normalized_components,
+    _complete_focal_percent_to_normalized_candidate,
+    _finite_float,
+    _positive_float,
+    _positive_product,
+    _positive_ratio,
+    _require_image_media,
+    _require_instance,
+)
+from .layout import Crop, FocalPoint, MediaFit
 from .resolver import ResolvedBlock
 
 _BOUNDARY_TOLERANCE = 1e-15
@@ -176,12 +186,7 @@ def resolve_image_geometry(
     _require_instance("resolved_image_block", resolved_image_block, ResolvedBlock)
     _require_instance("intrinsic", intrinsic, IntrinsicImageMetadata)
     _require_instance("target_box", target_box, ImageTargetBox)
-    if resolved_image_block.element_kind is not ElementKind.IMAGE_BLOCK:
-        raise ValueError("resolved_image_block must resolve an ImageBlock")
-
-    media = resolved_image_block.configuration.media
-    if media is None or media.fit is None:  # pragma: no cover - M4 invariant
-        raise ValueError("Resolved ImageBlock must have effective media and fit")
+    media = _require_image_media(resolved_image_block)
     source_crop = _complete_source_crop(media.crop)
 
     if media.fit is MediaFit.STRETCH:
@@ -233,15 +238,12 @@ def resolve_image_geometry(
 def _complete_source_crop(crop: Crop | None) -> NormalizedRect:
     if crop is None:
         return _FULL_RECT
-    x = 0 if crop.x is None else crop.x
-    y = 0 if crop.y is None else crop.y
-    width = 100 - x if crop.width is None else crop.width
-    height = 100 - y if crop.height is None else crop.height
+    x, y, width, height = _complete_crop_percent_to_normalized_components(crop)
     return NormalizedRect(
-        x=x / 100,
-        y=y / 100,
-        width=width / 100,
-        height=height / 100,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
     )
 
 
@@ -249,18 +251,7 @@ def _effective_focal_point(
     focal_point: FocalPoint | None,
     crop: NormalizedRect,
 ) -> NormalizedPoint:
-    center_x = crop.x + crop.width / 2
-    center_y = crop.y + crop.height / 2
-    x = (
-        center_x
-        if focal_point is None or focal_point.x is None
-        else focal_point.x / 100
-    )
-    y = (
-        center_y
-        if focal_point is None or focal_point.y is None
-        else focal_point.y / 100
-    )
+    x, y = _complete_focal_percent_to_normalized_candidate(focal_point, crop)
     return NormalizedPoint(
         x=_clamp(x, crop.x, crop.x + crop.width),
         y=_clamp(y, crop.y, crop.y + crop.height),
@@ -380,42 +371,6 @@ def _destination_aspect_ratio(
     )
 
 
-def _finite_float(name: str, value: float) -> float:
-    if not isinstance(value, int | float) or isinstance(value, bool):
-        raise TypeError(f"{name} must be numeric")
-    try:
-        result = float(value)
-    except OverflowError as error:
-        raise ValueError(f"{name} must be finite") from error
-    if not math.isfinite(result):
-        raise ValueError(f"{name} must be finite")
-    return result
-
-
-def _positive_float(name: str, value: float) -> float:
-    result = _finite_float(name, value)
-    if result <= 0:
-        raise ValueError(f"{name} must be positive")
-    return result
-
-
-def _positive_ratio(name: str, numerator: float, denominator: float) -> float:
-    try:
-        result = numerator / denominator
-    except OverflowError as error:
-        raise ValueError(f"{name} must be finite and positive") from error
-    if not isinstance(result, int | float) or not math.isfinite(result) or result <= 0:
-        raise ValueError(f"{name} must be finite and positive")
-    return float(result)
-
-
-def _positive_product(name: str, left: float, right: float) -> float:
-    result = left * right
-    if not math.isfinite(result) or result <= 0:
-        raise ValueError(f"{name} must be finite and positive")
-    return result
-
-
 def _snap_unit_coordinate(value: float) -> float:
     if math.isclose(value, 0, rel_tol=0, abs_tol=_BOUNDARY_TOLERANCE):
         return 0.0
@@ -502,11 +457,6 @@ def _aspect_close(left: float, right: float) -> bool:
         rel_tol=_ASPECT_RELATIVE_TOLERANCE,
         abs_tol=0,
     )
-
-
-def _require_instance(name: str, value: object, expected: type[object]) -> None:
-    if not isinstance(value, expected):
-        raise TypeError(f"{name} must be a {expected.__name__}")
 
 
 def _require_optional_instance(
