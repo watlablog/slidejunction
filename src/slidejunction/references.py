@@ -79,6 +79,30 @@ _KIND_ORDER = {
     ReferenceKind.CONFIGURATION: 0,
     ReferenceKind.INLINE_FORMAT: 1,
 }
+_BLOCKING_SOURCE_REFERENCE_DIAGNOSTIC_CODES = frozenset(
+    {
+        "invalid-config-ref-marker",
+        "unused-config-ref",
+        "unsupported-nested-config-ref",
+        "unterminated-inline-format",
+        "invalid-inline-format-tag",
+        "unsupported-setext-heading",
+        "unsupported-raw-html",
+        "unterminated-inline-math",
+        "unterminated-block-math",
+    }
+)
+_NON_BLOCKING_SOURCE_REFERENCE_DIAGNOSTIC_CODES = frozenset(
+    {"unexpected-inline-format-close"}
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _ConsumerOccurrence:
+    """One traversal occurrence, including consumers without a reference."""
+
+    consumer: ReferenceConsumer
+    block_depth: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -294,17 +318,104 @@ def _collect_definitions(
     return tuple(definitions)
 
 
+def _validate_reference_snapshot(
+    source_document: SourceDocument,
+    layout_document: LayoutDocument,
+    reference_index: ReferenceIndex,
+) -> None:
+    """Check graph identity consistency, without proving root provenance."""
+    if not isinstance(reference_index, ReferenceIndex):
+        raise TypeError("reference_index must be a ReferenceIndex")
+    expected_index = _build_reference_index(
+        source_document,
+        layout_document,
+        layout_path=None,
+    )
+    if not _indexes_match(reference_index, expected_index):
+        raise ValueError(
+            "reference_index does not match source_document and layout_document"
+        )
+
+
+def _indexes_match(actual: ReferenceIndex, expected: ReferenceIndex) -> bool:
+    if tuple(actual.definitions) != tuple(expected.definitions):
+        return False
+    if tuple(actual.usages) != tuple(expected.usages):
+        return False
+    for ref_id in expected.definitions:
+        actual_group = actual.definitions[ref_id]
+        expected_group = expected.definitions[ref_id]
+        if len(actual_group) != len(expected_group):
+            return False
+        for candidate, reference in zip(actual_group, expected_group, strict=True):
+            if (
+                candidate.ref_id != reference.ref_id
+                or candidate.kind is not reference.kind
+                or candidate.value is not reference.value
+                or candidate.config_pointer.pointer != reference.config_pointer.pointer
+            ):
+                return False
+    for ref_id in expected.usages:
+        actual_group = actual.usages[ref_id]
+        expected_group = expected.usages[ref_id]
+        if len(actual_group) != len(expected_group):
+            return False
+        for candidate, reference in zip(actual_group, expected_group, strict=True):
+            if (
+                candidate.ref_id != reference.ref_id
+                or candidate.kind is not reference.kind
+                or candidate.consumer is not reference.consumer
+                or candidate.source_span != reference.source_span
+            ):
+                return False
+    return True
+
+
+def _require_reliable_reference_discovery(source_document: SourceDocument) -> None:
+    """Reject source diagnostics that may hide reference intent, including unknowns.
+
+    This assumes a parse_markdown() result or an equivalently consistent snapshot
+    of text, semantic nodes, spans, and diagnostics. It does not reparse source or
+    prove root provenance. Graph validation is separate from this source-only gate;
+    severity alone never establishes that reference discovery is complete.
+    """
+    if not isinstance(source_document, SourceDocument):
+        raise TypeError("source_document must be a SourceDocument")
+    for diagnostic in source_document.presentation.diagnostics:
+        if diagnostic.code in _BLOCKING_SOURCE_REFERENCE_DIAGNOSTIC_CODES:
+            raise ValueError(
+                f"Source diagnostic {diagnostic.code!r} blocks reference discovery"
+            )
+        if diagnostic.code not in _NON_BLOCKING_SOURCE_REFERENCE_DIAGNOSTIC_CODES:
+            raise ValueError(
+                f"Unknown source diagnostic {diagnostic.code!r}: "
+                "reference discovery reliability cannot be established"
+            )
+
+
 def _collect_usages(document: SourceDocument) -> tuple[ReferenceUsage, ...]:
     usages: list[ReferenceUsage] = []
-    for item in document.presentation.items:
-        if isinstance(item, Slide):
-            _visit_slide(item, usages)
-        elif isinstance(item, Section):
-            _visit_slide(item.title_slide, usages)
-            for slide in item.slides:
-                _visit_slide(slide, usages)
-        else:  # pragma: no cover - SourceDocument model contract
-            raise TypeError("Presentation contains an invalid item")
+    for occurrence in _collect_consumer_occurrences(document):
+        consumer = occurrence.consumer
+        if isinstance(consumer, InlineFormat):
+            usages.append(
+                ReferenceUsage(
+                    ref_id=consumer.config_ref,
+                    kind=ReferenceKind.INLINE_FORMAT,
+                    consumer=consumer,
+                    source_span=consumer.source_span,
+                )
+            )
+        elif consumer.config_ref is not None:
+            marker = consumer.source_binding.config_marker_span
+            usages.append(
+                ReferenceUsage(
+                    ref_id=consumer.config_ref,
+                    kind=ReferenceKind.CONFIGURATION,
+                    consumer=consumer,
+                    source_span=marker or consumer.source_binding.syntax_span,
+                )
+            )
     return tuple(
         usage
         for _, usage in sorted(
@@ -314,55 +425,68 @@ def _collect_usages(document: SourceDocument) -> tuple[ReferenceUsage, ...]:
     )
 
 
-def _visit_slide(slide: Slide, usages: list[ReferenceUsage]) -> None:
+def _collect_consumer_occurrences(
+    document: SourceDocument,
+) -> tuple[_ConsumerOccurrence, ...]:
+    """Visit consumers in semantic traversal order without deduplicating identity."""
+    if not isinstance(document, SourceDocument):
+        raise TypeError("source_document must be a SourceDocument")
+    occurrences: list[_ConsumerOccurrence] = []
+    for item in document.presentation.items:
+        if isinstance(item, Slide):
+            _visit_slide(item, occurrences)
+        elif isinstance(item, Section):
+            _visit_slide(item.title_slide, occurrences)
+            for slide in item.slides:
+                _visit_slide(slide, occurrences)
+        else:  # pragma: no cover - SourceDocument model contract
+            raise TypeError("Presentation contains an invalid item")
+    return tuple(occurrences)
+
+
+def _visit_slide(slide: Slide, occurrences: list[_ConsumerOccurrence]) -> None:
     if slide.title is not None:
-        _visit_block(slide.title, usages)
+        _visit_block(slide.title, occurrences, depth=0)
     for block in slide.blocks:
-        _visit_block(block, usages)
+        _visit_block(block, occurrences, depth=0)
 
 
-def _visit_block(block: Block, usages: list[ReferenceUsage]) -> None:
-    if block.config_ref is not None:
-        marker = block.source_binding.config_marker_span
-        usages.append(
-            ReferenceUsage(
-                ref_id=block.config_ref,
-                kind=ReferenceKind.CONFIGURATION,
-                consumer=block,
-                source_span=marker or block.source_binding.syntax_span,
-            )
-        )
+def _visit_block(
+    block: Block,
+    occurrences: list[_ConsumerOccurrence],
+    *,
+    depth: int,
+) -> None:
+    if not isinstance(block, _CONFIGURATION_CONSUMERS):
+        raise TypeError("Presentation contains an invalid block")
+    occurrences.append(_ConsumerOccurrence(consumer=block, block_depth=depth))
 
     if isinstance(block, Heading | Paragraph):
         for inline in block.children:
-            _visit_inline(inline, usages)
+            _visit_inline(inline, occurrences, depth=depth)
     elif isinstance(block, ListBlock):
         for item in block.items:
             for child in item.blocks:
-                _visit_block(child, usages)
+                _visit_block(child, occurrences, depth=depth + 1)
     elif isinstance(block, BlockQuote):
         for child in block.blocks:
-            _visit_block(child, usages)
-    elif not isinstance(block, CodeBlock | ImageBlock | ThematicBreak | MathBlock):
-        raise TypeError("Presentation contains an invalid block")
+            _visit_block(child, occurrences, depth=depth + 1)
 
 
-def _visit_inline(inline: Inline, usages: list[ReferenceUsage]) -> None:
+def _visit_inline(
+    inline: Inline,
+    occurrences: list[_ConsumerOccurrence],
+    *,
+    depth: int,
+) -> None:
     if isinstance(inline, InlineFormat):
-        usages.append(
-            ReferenceUsage(
-                ref_id=inline.config_ref,
-                kind=ReferenceKind.INLINE_FORMAT,
-                consumer=inline,
-                source_span=inline.source_span,
-            )
-        )
+        occurrences.append(_ConsumerOccurrence(consumer=inline, block_depth=depth))
         for child in inline.children:
-            _visit_inline(child, usages)
+            _visit_inline(child, occurrences, depth=depth)
         return
     if isinstance(inline, _INLINE_CONTAINERS):
         for child in inline.children:
-            _visit_inline(child, usages)
+            _visit_inline(child, occurrences, depth=depth)
         return
     if isinstance(inline, _INLINE_LEAVES):
         return

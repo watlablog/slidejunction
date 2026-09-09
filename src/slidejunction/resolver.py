@@ -74,7 +74,7 @@ from .layout import (
 from .references import (
     ReferenceIndex,
     ReferenceKind,
-    _build_reference_index,
+    _validate_reference_snapshot,
 )
 
 
@@ -398,17 +398,7 @@ def resolve_presentation(
     reference_index: ReferenceIndex,
 ) -> ResolvedPresentation:
     """Resolve one immutable semantic/configuration snapshot in memory."""
-    if not isinstance(reference_index, ReferenceIndex):
-        raise TypeError("reference_index must be a ReferenceIndex")
-    expected_index = _build_reference_index(
-        source_document,
-        layout_document,
-        layout_path=None,
-    )
-    if not _indexes_match(reference_index, expected_index):
-        raise ValueError(
-            "reference_index does not match source_document and layout_document"
-        )
+    _validate_reference_snapshot(source_document, layout_document, reference_index)
 
     preset = _effective_preset(layout_document.theme.preset)
     palette = dict(preset.colors)
@@ -1237,40 +1227,6 @@ def _resolve_color(color, palette):
     if isinstance(color, ThemeColor):
         return palette.get(color.theme)
     raise TypeError("Configuration contains an invalid color value")
-
-
-def _indexes_match(actual: ReferenceIndex, expected: ReferenceIndex) -> bool:
-    if tuple(actual.definitions) != tuple(expected.definitions):
-        return False
-    if tuple(actual.usages) != tuple(expected.usages):
-        return False
-    for ref_id in expected.definitions:
-        actual_group = actual.definitions[ref_id]
-        expected_group = expected.definitions[ref_id]
-        if len(actual_group) != len(expected_group):
-            return False
-        for candidate, reference in zip(actual_group, expected_group, strict=True):
-            if (
-                candidate.ref_id != reference.ref_id
-                or candidate.kind is not reference.kind
-                or candidate.value is not reference.value
-                or candidate.config_pointer.pointer != reference.config_pointer.pointer
-            ):
-                return False
-    for ref_id in expected.usages:
-        actual_group = actual.usages[ref_id]
-        expected_group = expected.usages[ref_id]
-        if len(actual_group) != len(expected_group):
-            return False
-        for candidate, reference in zip(actual_group, expected_group, strict=True):
-            if (
-                candidate.ref_id != reference.ref_id
-                or candidate.kind is not reference.kind
-                or candidate.consumer is not reference.consumer
-                or candidate.source_span != reference.source_span
-            ):
-                return False
-    return True
 
 
 def _element_kind(block: Block) -> ElementKind:

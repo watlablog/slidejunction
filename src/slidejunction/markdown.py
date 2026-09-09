@@ -25,6 +25,11 @@ from ._markdown_source import (
     token_block_span,
     token_relative_span,
 )
+from ._reference_syntax import (
+    _INLINE_FORMAT_CLOSE,
+    _INLINE_FORMAT_OPEN,
+    _VALID_CONFIG_REF,
+)
 from .document import (
     Block,
     BlockQuote,
@@ -59,11 +64,8 @@ from .document import (
     ThematicBreak,
 )
 
-_VALID_CONFIG_REF = re.compile(r"^<!-- sj:ref=([1-9][0-9]*) -->$")
 _MARKER_INTENT = re.compile(r"^\s*<!--\s*sj:ref\b")
 _COMMENT = re.compile(r"^\s*<!--[\s\S]*-->\s*$")
-_INLINE_FORMAT_OPEN = re.compile(r"<sj-format ref[ \t]*=[ \t]*([1-9][0-9]*)>")
-_INLINE_FORMAT_CLOSE = "</sj-format>"
 _INLINE_FORMAT_INTENT = re.compile(r"</?sj-format(?=[ \t/>]|\n|$)")
 _SCRIPT_OPAQUE_STARTS = frozenset("\\`<[!")
 
