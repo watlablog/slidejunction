@@ -13,7 +13,7 @@ _PROJECT_ENTRY_NAMES = {
     "deck.py",
     "slides.md",
     "theme.css",
-    "layout.css",
+    "layout.json",
     "assets",
 }
 
@@ -67,10 +67,18 @@ def test_init_creates_minimal_project_in_nested_path(tmp_path: Path) -> None:
     assert config["deck"] == {
         "format_version": 1,
         "source": "slides.md",
+        "layout": "layout.json",
         "theme": "theme.css",
-        "layout": "layout.css",
         "assets": "assets",
     }
+    assert (project_path / "deck.toml").read_text(encoding="utf-8") == (
+        "[deck]\n"
+        "format_version = 1\n"
+        'source = "slides.md"\n'
+        'layout = "layout.json"\n'
+        'theme = "theme.css"\n'
+        'assets = "assets"\n'
+    )
 
     expected_contents = {
         "deck.py": (
@@ -82,7 +90,19 @@ def test_init_creates_minimal_project_in_nested_path(tmp_path: Path) -> None:
         ),
         "slides.md": "# Untitled Presentation\n",
         "theme.css": "/* SlideJunction presentation theme */\n",
-        "layout.css": "/* Slide-specific layout overrides */\n",
+        "layout.json": (
+            "{\n"
+            '  "format_version": 1,\n'
+            '  "theme": {\n'
+            '    "preset": {\n'
+            '      "name": "slidejunction-default",\n'
+            '      "version": 1\n'
+            "    }\n"
+            "  },\n"
+            '  "configurations": {},\n'
+            '  "inline_formats": {}\n'
+            "}\n"
+        ),
     }
     for name, expected_content in expected_contents.items():
         assert (project_path / name).read_text(encoding="utf-8") == expected_content
@@ -140,6 +160,20 @@ def test_init_preserves_unrelated_existing_entries(tmp_path: Path) -> None:
     assert notes.read_text(encoding="utf-8") == "Keep this content.\n"
     assert unrelated_directory.is_dir()
     assert not any(unrelated_directory.iterdir())
+
+
+def test_init_treats_existing_layout_css_as_an_unrelated_future_derivative(
+    tmp_path: Path,
+) -> None:
+    project_path = tmp_path / "my-talk"
+    project_path.mkdir()
+    legacy_derivative = project_path / "layout.css"
+    legacy_derivative.write_text("/* preserve */\n", encoding="utf-8")
+
+    Deck.init(project_path)
+
+    assert legacy_derivative.read_text(encoding="utf-8") == "/* preserve */\n"
+    assert (project_path / "layout.json").is_file()
 
 
 def test_init_resolves_directory_symlink(tmp_path: Path) -> None:

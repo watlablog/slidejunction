@@ -4,20 +4,21 @@ from pathlib import Path
 
 import pytest
 
+import slidejunction._project_io as project_io
 from slidejunction import Deck
 
 _DEFAULT_SETTINGS = {
     "format_version": "1",
     "source": '"slides.md"',
+    "layout": '"layout.json"',
     "theme": '"theme.css"',
-    "layout": '"layout.css"',
     "assets": '"assets"',
 }
 _REQUIRED_ENTRIES = (
     ("deck.py", None, False),
     ("slides.md", "source", False),
+    ("layout.json", "layout", False),
     ("theme.css", "theme", False),
-    ("layout.css", "layout", False),
     ("assets", "assets", True),
 )
 
@@ -136,14 +137,14 @@ def test_open_accepts_configured_entries_in_subdirectories(tmp_path: Path) -> No
     resources.mkdir()
     (project / "slides.md").replace(content / "slides.md")
     (project / "theme.css").replace(styles / "theme.css")
-    (project / "layout.css").replace(styles / "layout.css")
+    (project / "layout.json").replace(styles / "layout.json")
     (project / "assets").replace(resources / "assets")
     _write_manifest(
         project,
         values={
             "source": _toml_string("content/slides.md"),
             "theme": _toml_string("styles/theme.css"),
-            "layout": _toml_string("styles/layout.css"),
+            "layout": _toml_string("styles/layout.json"),
             "assets": _toml_string("resources/assets"),
         },
     )
@@ -399,6 +400,89 @@ def test_open_rejects_required_entry_with_wrong_filesystem_type(
 
     with pytest.raises(expected_exception):
         Deck.open(project)
+
+
+def test_open_rejects_source_and_layout_with_same_logical_path(tmp_path: Path) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+    _write_manifest(project, values={"layout": '"slides.md"'})
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        Deck.open(project)
+
+
+def test_open_rejects_different_symlinks_to_same_required_target(
+    tmp_path: Path,
+) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+    source = project / "slides.md"
+    layout = project / "layout.json"
+    shared = tmp_path / "shared-input"
+    layout.replace(shared)
+    source.unlink()
+    _create_symlink_or_skip(source, shared)
+    _create_symlink_or_skip(layout, shared)
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        Deck.open(project)
+
+
+def test_open_rejects_hard_link_alias_with_another_required_file(
+    tmp_path: Path,
+) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+    theme = project / "theme.css"
+    theme.unlink()
+    try:
+        theme.hardlink_to(project / "slides.md")
+    except OSError as error:
+        pytest.skip(f"Hard links are unavailable: {error}")
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        Deck.open(project)
+
+
+@pytest.mark.parametrize("fallback", ["unavailable", "unsupported"])
+def test_open_alias_check_falls_back_to_stat_when_samefile_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fallback: str,
+) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+    theme = project / "theme.css"
+    theme.unlink()
+    try:
+        theme.hardlink_to(project / "slides.md")
+    except OSError as error:
+        pytest.skip(f"Hard links are unavailable: {error}")
+
+    if fallback == "unavailable":
+        monkeypatch.setattr(project_io.os.path, "samefile", None)
+    else:
+
+        def unsupported(*args: object) -> bool:
+            raise NotImplementedError
+
+        monkeypatch.setattr(project_io.os.path, "samefile", unsupported)
+
+    with pytest.raises(ValueError, match="must be distinct"):
+        Deck.open(project)
+
+
+def test_open_does_not_guess_distinctness_after_samefile_io_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = Deck.init(tmp_path / "my-talk").root
+    failure = OSError("samefile failed")
+
+    def fail(*args: object) -> bool:
+        raise failure
+
+    monkeypatch.setattr(project_io.os.path, "samefile", fail)
+
+    with pytest.raises(OSError) as captured:
+        Deck.open(project)
+    assert captured.value is failure
 
 
 def _write_manifest(
