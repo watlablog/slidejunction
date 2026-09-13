@@ -12,7 +12,7 @@ def test_package_can_be_imported() -> None:
 
 
 def test_cli_main(capsys) -> None:
-    assert main() == 0
+    assert main([]) == 0
 
     captured = capsys.readouterr()
     assert captured.out == "SlideJunction\n"
